@@ -7,9 +7,13 @@ import math
 import random
 import pandas as pd
 import sys
+from sklearn.model_selection import train_test_split
+from sklearn.model_selection import KFold
 
-sys.setrecursionlimit(5000)
-isContinuous = [True, True, True, True]
+sys.setrecursionlimit(100000)
+threshold_entropy = 0.3
+threshold_gini = 0.4
+
 
 class Node(object):
     def __init__(self, feature, label, leaves):
@@ -31,34 +35,25 @@ def RandomList(low, high, length):
     return randomList
 
 
-def DecisionTree(dataSet, criterion, purning=None):
+def DecisionTree(dataSet, isContinuous, criterion, purning=None):
     if purning == None:
-        root = TreeGenerate(dataSet, criterion)
+        root = TreeGenerate(dataSet, criterion, isContinuous)
     elif purning == 'pre':
-        n = len(dataSet[dataSet.columns[-1]])
-        trainIndex = RandomList(1, n, n/4)
-        trainSet = dataSet.iloc[trainIndex]
-        vldSet = dataSet.drop(trainIndex)
-        root = TreePrePurning(trainSet, vldSet, criterion)
+        trainSet, vldSet, _, _ = train_test_split(dataSet, dataSet[dataSet.columns[-1]], test_size=1/3, random_state=0)
+        root = TreePrePurning(trainSet, vldSet, criterion, isContinuous)
     elif purning == 'post':
-        n = len(dataSet.iloc[0])
-        trainIndex = RandomList(1, n, n/4)
-        trainSet = dataSet.iloc[trainIndex]
-        vldSet = dataSet.drop(trainIndex)
-        root = TreeGenerate(trainSet, criterion)
-        acc = PredictAccuracy(root, vldSet)
-        print('vld accuracy before pruning:')
-        print(acc)
-        acc = TreePostPurning(root, vldSet)
-        print('vld accuracy after pruning:')
-        print(acc)
+        trainSet, vldSet, _, _ = train_test_split(dataSet, dataSet[dataSet.columns[-1]], test_size=1 / 3,
+                                                  random_state=0)
+        root = TreeGenerate(trainSet, criterion, isContinuous)
+        # acc = PredictAccuracy(root, vldSet, isContinuous)
+        TreePostPurning(root, vldSet, isContinuous)
     else:
         print('Wrong pruning command!')
-        root = TreeGenerate(dataSet, criterion)
+        root = TreeGenerate(dataSet, criterion, isContinuous)
     return root
 
 
-def TreePrePurning(trainSet, vldSet, criterion):
+def TreePrePurning(trainSet, vldSet, criterion, isContinuous):
     newNode = Node(None, None, {})
     labels = trainSet[trainSet.columns[-1]]
     labelCount = CountLabels(labels)
@@ -66,9 +61,16 @@ def TreePrePurning(trainSet, vldSet, criterion):
         newNode.label = max(labelCount, key=labelCount.get)
         if len(labelCount) == 1 or len(labels) == 0:
             return newNode
-        currentAcc = PredictAccuracy(newNode, vldSet)
+        currentAcc = PredictAccuracy(newNode, vldSet, isContinuous)
 
-        newNode.feature, divValue = BestFeature(trainSet, criterion)
+        newNode.feature, divValue, gain = BestFeature(trainSet, criterion, isContinuous)
+        if criterion == 'entropy' and gain < threshold_entropy:
+            newNode.feature = None
+            return newNode
+        elif criterion == 'gini' and gain > threshold_gini:
+            newNode.feature = None
+            return newNode
+
         if divValue == 0:
             valueCount = CountValue(trainSet[newNode.feature])
             for value in valueCount:
@@ -79,12 +81,12 @@ def TreePrePurning(trainSet, vldSet, criterion):
                 childLabelCount = CountLabels(childLabel)
                 child.label = max(childLabelCount, key=childLabelCount.get)
                 newNode.leaves[value] = child
-            newAcc = PredictAccuracy(newNode, vldSet)
+            newAcc = PredictAccuracy(newNode, vldSet, isContinuous)
             if newAcc > currentAcc:
                 for value in valueCount:
                     subData = trainSet[trainSet[newNode.feature].isin([value])]
                     subData = subData.drop(newNode.feature, 1)
-                    newNode.leaves[value] = TreeGenerate(subData, criterion)
+                    newNode.leaves[value] = TreeGenerate(subData, criterion, isContinuous)
             else:
                 newNode.feature = None
                 newNode.leaves = {}
@@ -103,10 +105,10 @@ def TreePrePurning(trainSet, vldSet, criterion):
             newRight.label = max(rightLabelCount, key=rightLabelCount.get)
             newNode.leaves[left] = newLeft
             newNode.leaves[right] = newRight
-            newAcc = PredictAccuracy(newNode, vldSet)
+            newAcc = PredictAccuracy(newNode, vldSet, isContinuous)
             if newAcc > currentAcc:
-                newNode.leaves[left] = TreeGenerate(leftSet, criterion)
-                newNode.leaves[right] = TreeGenerate(rightSet, criterion)
+                newNode.leaves[left] = TreeGenerate(leftSet, criterion, isContinuous)
+                newNode.leaves[right] = TreeGenerate(rightSet, criterion, isContinuous)
             else:
                 newNode.feature = None
                 newNode.leaves = {}
@@ -114,45 +116,40 @@ def TreePrePurning(trainSet, vldSet, criterion):
     return newNode
 
 
-def TreePostPurning(root, vldSet):
+def TreePostPurning(root, vldSet, isContinuous):
     if root.feature == None:  # reach leaves
-        return PredictAccuracy(root, vldSet)
-
+        return PredictAccuracy(root, vldSet, isContinuous)
     acc = 0
     if isContinuous[int(root.feature)-1] == True:
         for key in list(root.leaves):
             num = re.findall(r"\d+\.?\d*", key)
             divValue = float(num[0])
             break
-
         left = "<=%.3f" % divValue
         right = ">%.3f" % divValue
         leftSet = vldSet[vldSet[root.feature] <= divValue]
         rightSet = vldSet[vldSet[root.feature] > divValue]
-
-        accLeft = TreePostPurning(root.leaves[left], leftSet)
-        accRight = TreePostPurning(root.leaves[right], rightSet)
-
+        accLeft = TreePostPurning(root.leaves[left], leftSet, isContinuous)
+        accRight = TreePostPurning(root.leaves[right], rightSet, isContinuous)
         if accLeft == -1 or accRight == -1:
             return -1
+        elif len(vldSet[vldSet.columns[-1]]) == 0:
+            return 0
         else:
-            acc += accLeft * len(leftSet.index) / len(vldSet.index)
-            acc += accRight * len(rightSet.index) / len(vldSet.index)
-
+            acc += accLeft * len(leftSet[leftSet.columns[-1]]) / len(vldSet[vldSet.columns[-1]])
+            acc += accRight * len(rightSet[rightSet.columns[-1]]) / len(vldSet[vldSet.columns[-1]])
     else:
         valueCount = CountValue(vldSet[root.feature])
         for value in list(valueCount):
             subSet = vldSet[vldSet[root.feature].isin([value])]  # get sub set
-            accSub = TreePostPurning(root.leaves[value], subSet)
+            accSub = TreePostPurning(root.leaves[value], subSet, isContinuous)
             if accSub == -1:  # -1 means no pruning back from this child
                 return -1
             else:
                 acc += accSub * len(subSet.index) / len(vldSet.index)
-
     # calculating the test accuracy on this node
     node = Node(None, root.label, {})
-    newAcc = PredictAccuracy(node, vldSet)
-
+    newAcc = PredictAccuracy(node, vldSet, isContinuous)
     # check if need pruning
     if newAcc >= acc:
         root.feature = None
@@ -162,7 +159,7 @@ def TreePostPurning(root, vldSet):
         return -1
 
 
-def TreeGenerate(dataSet, criterion):
+def TreeGenerate(dataSet, criterion, isContinuous):
     newNode = Node(None, None, {})
     labels = dataSet[dataSet.columns[-1]]
     labelCount = CountLabels(labels)
@@ -171,25 +168,32 @@ def TreeGenerate(dataSet, criterion):
         if len(labelCount) == 1 or len(labels) == 0:
             return newNode
 
-        newNode.feature, divValue = BestFeature(dataSet, criterion)
+        newNode.feature, divValue, gain = BestFeature(dataSet, criterion, isContinuous)
+        if criterion == 'entropy' and gain < threshold_entropy:
+            newNode.feature = None
+            return newNode
+        elif criterion == 'gini' and gain > threshold_gini:
+            newNode.feature = None
+            return newNode
+
         if divValue == 0:
             valueCount = CountValue(dataSet[newNode.feature])
             for value in valueCount:
                 subData = dataSet[dataSet[newNode.feature].isin([value])]
                 subData = subData.drop(newNode.feature, 1)
-                newNode.leaves[value] = TreeGenerate(subData, criterion)
+                newNode.leaves[value] = TreeGenerate(subData, criterion, isContinuous)
         else:
             left = "<=%.3f" % divValue
             right = ">%.3f" % divValue
             leftSet = dataSet[dataSet[newNode.feature] <= divValue ]
             rightSet = dataSet[dataSet[newNode.feature] > divValue ]
-            newNode.leaves[left] = TreeGenerate(leftSet, criterion)
-            newNode.leaves[right] = TreeGenerate(rightSet, criterion)
+            newNode.leaves[left] = TreeGenerate(leftSet, criterion, isContinuous)
+            newNode.leaves[right] = TreeGenerate(rightSet, criterion, isContinuous)
 
     return newNode
 
 
-def Predict(root, sample):
+def Predict(root, sample, isContinuous):
     while root.feature != None:
         if isContinuous[int(root.feature)-1] == True:
             for key in list(root.leaves):
@@ -211,12 +215,12 @@ def Predict(root, sample):
     return root.label
 
 
-def PredictAccuracy(root, sampleSet):
+def PredictAccuracy(root, sampleSet, isContinuous):
     if len(sampleSet.index) == 0:
         return 0
     acc = 0
     for i in sampleSet.index:
-        label = Predict(root, sampleSet[sampleSet.index == i])
+        label = Predict(root, sampleSet[sampleSet.index == i], isContinuous)
         if label == sampleSet[sampleSet.columns[-1]][i]:
             acc += 1
     return acc / len(sampleSet.index)
@@ -242,32 +246,34 @@ def CountValue(data):
     return valueCount
 
 
-def BestFeature(dataSet, criterion):
+def BestFeature(dataSet, criterion, isContinuous):
     if criterion == 'entropy':
         gain = 0
         for feature in dataSet.columns[1:-1]:
-            tempGain, tempDiv = CalculateGain(dataSet, feature)
+            tempGain, tempDiv = CalculateGain(dataSet, feature, isContinuous)
             if tempGain > gain:
                 gain = tempGain
                 bestFeature = feature
                 divValue = tempDiv
+        return bestFeature, divValue, gain
     elif criterion == 'gini':
         gini = float('Inf')
         for feature in dataSet.columns[1:-1]:
-            tempGini, tempDiv = CalculateGiniIndex(dataSet, feature)
+            tempGini, tempDiv = CalculateGiniIndex(dataSet, feature, isContinuous)
             if tempGini < gini:
                 gini = tempGini
                 bestFeature = feature
                 divValue = tempDiv
+        return bestFeature, divValue, gini
     else:
         print('Wrong criterion!')
         bestFeature = -1
         divValue = 0
         gain = 0
-    return bestFeature, divValue
+        return bestFeature, divValue, gain
 
 
-def CalculateGain(dataSet, index):
+def CalculateGain(dataSet, index, isContinuous):
     gain = CalculateEntropy(dataSet.values[:, -1])
     divValue = 0
     n = len(dataSet[index])
@@ -302,7 +308,7 @@ def CalculateEntropy(labels):
     return ent
 
 
-def CalculateGiniIndex(dataSet, feature):
+def CalculateGiniIndex(dataSet, feature, isContinuous):
     giniIndex = 0
     divValue = 0
     n = len(dataSet[feature])
@@ -340,6 +346,49 @@ def CalculateGini(labels):
 if __name__ == "__main__":
     with open("data/iris.csv", mode='r') as data_file:
         dataSet = pd.read_csv(data_file, header=0)
-    root = DecisionTree(dataSet, criterion='entropy')
-    acc = PredictAccuracy(root, dataSet)
-    print(acc)
+        n = len(dataSet[dataSet.columns[-1]])
+    # 10-fold cross validation
+    kf = KFold(n_splits=10)
+    isContinuous = [True, True, True, True]
+    labels = dataSet[dataSet.columns[-1]]
+    labelCount = CountLabels(labels)
+    KFoldTrainSet = {}
+    KFoldTestSet={}
+    l = 0
+    for label in labelCount:
+        subSet = dataSet[dataSet[dataSet.columns[-1]] == label]
+        n = len(subSet[subSet.columns[-1]])
+        t = 0
+        for train_index, test_index in kf.split(subSet):
+            if l == 0:
+                KFoldTestSet[t] = subSet.iloc[test_index]
+                KFoldTrainSet[t] = subSet.iloc[train_index]
+                t += 1
+            else:
+                KFoldTestSet[t] = pd.concat([KFoldTestSet[t], subSet.iloc[test_index]])
+                KFoldTrainSet[t] = pd.concat([KFoldTrainSet[t], subSet.iloc[train_index]])
+                t += 1
+        if l == 0:
+            l = 1
+
+    for t in range(10):
+        trainSet = KFoldTrainSet[t]
+        testSet = KFoldTestSet[t]
+        root = DecisionTree(trainSet, isContinuous, criterion='entropy')
+        acc = PredictAccuracy(root, testSet, isContinuous)
+        print(acc)
+        root = DecisionTree(trainSet, isContinuous, criterion='entropy', purning='pre')
+        acc = PredictAccuracy(root, testSet, isContinuous)
+        print(acc)
+        root = DecisionTree(trainSet, isContinuous, criterion='entropy', purning='post')
+        acc = PredictAccuracy(root, testSet, isContinuous)
+        print(acc)
+        root = DecisionTree(trainSet, isContinuous, criterion='gini')
+        acc = PredictAccuracy(root, testSet, isContinuous)
+        print(acc)
+        root = DecisionTree(trainSet, isContinuous, criterion='gini', purning='pre')
+        acc = PredictAccuracy(root, testSet, isContinuous)
+        print(acc)
+        root = DecisionTree(trainSet, isContinuous, criterion='gini', purning='post')
+        acc = PredictAccuracy(root, testSet, isContinuous)
+        print(acc)
