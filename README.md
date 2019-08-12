@@ -1,2 +1,4 @@
 # MachineLearning-ZZH
-周志华《机器学习》代码练习
+Homework for Foundations of Machine Learning, Spring 2019
+School of Mathematical Science, Peking University, China
+The problems are from "Machine Learning" written by Professor Zhi-Hua Zhou (Computer Science and Artificial Intelligence, Nanjing University, China)
